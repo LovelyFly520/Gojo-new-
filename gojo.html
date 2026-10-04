@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>咒术回战：新宿决战 - 网页版原型</title>
+    <style>
+        body { margin: 0; background: #111; color: #fff; font-family: sans-serif; }
+        #ui { position: absolute; top: 10px; left: 10px; right: 10px; }
+        .bar { width: 200px; height: 20px; background: #333; border-radius: 10px; overflow: hidden; margin: 5px 0; }
+        .fill { height: 100%; width: 100%; background: #e91e63; transition: width 0.1s; }
+        .text { font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="bar"><div class="fill" style="width: 100%"></div><div class="text">五条悟 血量: <span id="gojo-hp">100</span></div></div>
+        <div class="bar"><div class="fill" style="width: 100%"></div><div class="text">宿傩 血量: <span id="sukuna-hp">100</span></div></div>
+        <div class="text">咒力: <span id="energy">6/6</span> | 领域: <span id="domain">冷却</span></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <script>
+        // ===================== 配置 =====================
+        const GAME_CONFIG = {
+            playerSpeed: 150,
+            attackCooldown: 200,
+            domainEnergyCost: 3,
+            domainDuration: 3000,
+            domainCooldown: 15000,
+        };
+
+        // ===================== 变量声明 (防止未定义) =====================
+        let gojoHP = 100, sukunaHP = 100, energy = 6;
+        let domainActive = false;
+        let domainEndTime = 0;
+        let domainCooldownTimer = null; // 确保初始化为 null
+        let enemyTimer = 0; // 新增：敌人攻击计时器
+
+        // ===================== Phaser 配置 =====================
+        const config = {
+            type: Phaser.AUTO,
+            width: window.innerWidth,
+            height: window.innerHeight,
+            backgroundColor: '#111',
+            physics: {
+                default: 'arcade',
+                arcade: { gravity: { y: 0 }, debug: false }
+            },
+            scene: {
+                preload: preload,
+                create: create,
+                update: update
+            }
+        };
+
+        // ===================== Scene 对象缓存 =====================
+        // 使用 const self = this; 在 scene 内部函数中避免 this 丢失
+        let game; // 全局 game 对象，便于外部调用
+
+        // ===================== Phaser Scene =====================
+        function preload() {
+            // 这里可以 preload 图片，我们用矩形绘制
+        }
+
+        function create() {
+            // 缓存 this，便于内部函数引用
+            const self = this;
+
+            this.cameras.main.setBackgroundColor('#111');
+
+            // 创建玩家 (五条悟，蓝色)
+            player = this.physics.add.rectangle(
+                this.cameras.width / 2 - 80, this.cameras.height / 2, 50, 50
+            );
+            player.setColor(0x3399ff);
+            player.body.setCollideWorldBounds(true);
+            player.maxSpeed = GAME_CONFIG.playerSpeed;
+
+            // 创建敌人 (宿傩，红色)
+            enemy = this.physics.add.rectangle(
+                this.cameras.width / 2 + 80, this.cameras.height / 2, 50, 50
+            );
+            enemy.setColor(0xff3333);
+            enemy.body.setCollideWorldBounds(true);
+            enemy.maxSpeed = GAME_CONFIG.playerSpeed;
+
+            // **关键修复**：在这里初始化 enemyTimer，防止 update 中 undefined
+            enemyTimer = this.time.now + 800; // 首次攻击间隔 800ms
+
+            // 输入键盘
+            cursors = this.input.keyboard.createCursorKeys();
+            keyJ = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.J);
+            keyK = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.K);
+            keyL = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.L);
+            keyShift = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
+
+            // UI 更新
+            updateUI();
+
+            // 每 5 秒自动回 1 槽咒力（如果未满）
+            this.time.addEvent({
+                delay: 5000,
+                callback: () => {
+                    if (energy < 6) energy++;
+                    updateUI();
+                },
+                loop: true,
+                pause: true
+            });
+        }
+
+        function update() {
+            // 缓存 this，防止在内部函数中丢失
+            const self = this;
+
+            let pv = 0, nv = 0;
+            if (cursors.left.isDown) pv = -1;
+            if (cursors.right.isDown) pv = 1;
+            if (cursors.up.isDown) nv = -1;
+            if (cursors.down.isDown) nv = 1;
+            if (pv !== 0 && nv !== 0) { pv *= 0.707; nv *= 0.707; } // 归一化对角线速度
+            player.setVelocityX(pv * GAME_CONFIG.playerSpeed);
+            player.setVelocityY(nv * GAME_CONFIG.playerSpeed);
+
+            // --- 玩家攻击 ---
+            // 普攻 (J)
+            if (Phaser.Input.Keyboard.JustDown(keyJ) && !domainActive) {
+                // 创建子弹
+                let proj = self.physics.add.rectangle(player.x, player.y, 15, 15);
+                proj.setColor(0xffff00); // 黄色
+                proj.body.velocity.set(0, -200); // 向上射
+                proj.damage = 10;
+                proj.type = 'pseudo';
+                projectiles.push(proj);
+            }
+            // 特殊 (K)
+            if (Phaser.Input.Keyboard.JustDown(keyK) && !domainActive) {
+                let proj = self.physics.add.rectangle(player.x, player.y, 15, 15);
+                proj.setColor(0xffa500); // 橙色
+                proj.body.velocity.set(0, -250);
+                proj.damage = 25;
+                proj.type = 'special';
+                projectiles.push(proj);
+            }
+            // 超必 (L)
+            if (Phaser.Input.Keyboard.JustDown(keyL) && !domainActive && energy >= 3) {
+                energy--; updateUI();
+                let proj = self.physics.add.rectangle(player.x, player.y, 15, 15);
+                proj.setColor(0xffd700); // 金色
+                proj.body.velocity.set(0, -300);
+                proj.damage = 50;
+                proj.type = 'super';
+                projectiles.push(proj);
+            }
+            // 领域展开 (Shift)
+            if (Phaser.Input.Keyboard.JustDown(keyShift) && energy >= 3 && !domainActive) {
+                activateDomain();
+            }
+
+            // --- 领域状态 ---
+            if (domainActive) {
+                if (this.time.now > domainEndTime) {
+                    endDomain();
+                }
+                // 领域内每 0.5 秒对宿傩造成 15 点伤害
+                if (this.time.now % 500 < 10) {
+                    sukunaHP = Math.max(0, sukunaHP - 15);
+                    updateUI();
+                }
+            }
+
+            // --- 敌人 AI 与攻击 ---
+            // 朝向玩家移动
+            let dx = player.x - enemy.x;
+            let dy = player.y - enemy.y;
+            let dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > 50) {
+                enemy.setVelocityX((dx / dist) * GAME_CONFIG.playerSpeed);
+                enemy.setVelocityY((dy / dist) * GAME_CONFIG.playerSpeed);
+            } else {
+                enemy.setVelocity(0, 0);
+            }
+
+            // 敌人定时攻击（每 800ms）
+            if (this.time.now > enemyTimer) {
+                // 简单的向玩家射击
+                let proj = self.physics.add.rectangle(enemy.x, enemy.y, 15, 15);
+                proj.setColor(0xff0000); // 红色
+                let angle = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+                proj.body.velocity.set(
+                    Math.cos(angle) * 150,
+                    Math.sin(angle) * 150
+                );
+                proj.damage = 15;
+                proj.type = 'enemy';
+                projectiles.push(proj);
+
+                // 重置计时器
+                enemyTimer = this.time.now + 800;
+            }
+
+            // --- 子弹逻辑 ---
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                let p = projectiles[i];
+                p.x += p.velocityX;
+                p.y += p.velocityY;
+
+                // 超出屏幕移除
+                if (p.x < -20 || p.x > self.cameras.width + 20 ||
+                    p.y < -20 || p.y > self.cameras.height + 20) {
+                    p.destroy();
+                    projectiles.splice(i, 1);
+                    continue;
+                }
+
+                // 碰撞五条悟
+                if (Phaser.Geom.Intersects.Rectangle(p, player)) {
+                    gojoHP = Math.max(0, gojoHP - p.damage);
+                    updateUI();
+                    p.destroy();
+                    projectiles.splice(i, 1);
+                    continue;
+                }
+
+                // 碰撞宿傩
+                if (Phaser.Geom.Intersects.Rectangle(p, enemy)) {
+                    sukunaHP = Math.max(0, sukunaHP - p.damage);
+                    updateUI();
+                    p.destroy();
+                    projectiles.splice(i, 1);
+                    // 如果领域激活，伤害已在上面的 if (domainActive) 中额外处理，这里不重复扣血
+                }
+            }
+
+            // --- 摄像机跟随 ---
+            this.cameras.main.startFollow(player, true, 0.1, 0.1);
+        }
+
+        // ===================== 领域展开 =====================
+        function activateDomain() {
+            domainActive = true;
+            domainEndTime = this.time.now + GAME_CONFIG.domainDuration;
+            energy -= 3;
+            updateUI();
+            document.getElementById('domain').textContent = '领域展开！';
+            enemy.maxSpeed *= 0.5; // 领域内敌人移动变慢
+
+            // 领域结束自动处理
+            // 使用 setTimeout 或 this.time.addEvent，这里用简单的定时判断在 update 中处理
+        }
+
+        function endDomain() {
+            domainActive = false;
+            document.getElementById('domain').textContent = '冷却中';
+            enemy.maxSpeed *= 2; // 恢复敌人速度
+
+            // 冷却计时器：domainCooldown 期间不能用领域
+            if (domainCooldownTimer !== null) {
+                domainCooldownTimer.remove(); // 清除旧计时器
+            }
+            domainCooldownTimer = this.time.addEvent({
+                delay: GAME_CONFIG.domainCooldown,
+                callback: () => {
+                    document.getElementById('domain').textContent = '咒力: ' + energy + '/6';
+                },
+                loop: false
+            });
+        }
+
+        // ===================== UI 更新 =====================
+        function updateUI() {
+            document.getElementById('gojo-hp').textContent = gojoHP;
+            document.getElementById('sukuna-hp').textContent = sukunaHP;
+            document.getElementById('energy').textContent = energy + '/6';
+        }
+
+        // ===================== 初始化 Phaser 游戏 =====================
+        game = new Phaser.Game(config);
+    </script>
+</body>
+</html>
